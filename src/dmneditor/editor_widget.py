@@ -9,8 +9,8 @@ from __future__ import annotations
 from datetime import datetime
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QKeyEvent, QTextBlock, QTextCursor
-from PySide6.QtWidgets import QPlainTextEdit
+from PySide6.QtGui import QFont, QKeyEvent, QTextBlock, QTextBlockFormat, QTextCursor
+from PySide6.QtWidgets import QTextEdit
 
 from . import logic
 
@@ -18,10 +18,11 @@ FONT_FAMILY = "Consolas"
 FONT_POINT_SIZE = 18
 
 
-class OutlineEditor(QPlainTextEdit):
+class OutlineEditor(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.setAcceptRichText(False)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
 
         font = QFont(FONT_FAMILY, FONT_POINT_SIZE)
         font.setStyleHint(QFont.StyleHint.Monospace)
@@ -37,7 +38,27 @@ class OutlineEditor(QPlainTextEdit):
         if not text.endswith("\n"):
             text += "\n"
         self.setPlainText(text)
+        block = self.document().begin()
+        while block.isValid():
+            self._apply_hanging_indent(block)
+            block = block.next()
+        self.document().clearUndoRedoStacks()
         self.document().setModified(False)
+
+    def _apply_hanging_indent(self, block: QTextBlock) -> None:
+        """Wrapped continuation lines align under where this line's actual
+        text starts - after its leading tabs and, if present, its
+        timestamp - rather than back at column 0.
+        """
+        text = block.text()
+        margin = logic.indent_prefix_len(text) * self.tabStopDistance()
+        if logic.line_has_timestamp(text):
+            margin += self.fontMetrics().horizontalAdvance("00:00a ")
+
+        fmt = block.blockFormat()
+        fmt.setLeftMargin(margin)
+        fmt.setTextIndent(-margin)
+        QTextCursor(block).setBlockFormat(fmt)
 
     # ------------------------------------------------------------------
     # key event funnel
@@ -111,6 +132,7 @@ class OutlineEditor(QPlainTextEdit):
         place_cursor.setPosition(insert_pos + len(stamp))
         self.setTextCursor(place_cursor)
         super().keyPressEvent(event)
+        self._apply_hanging_indent(block)
         edit_cursor.endEditBlock()
         return True
 
@@ -137,6 +159,7 @@ class OutlineEditor(QPlainTextEdit):
         if level > 0:
             edit_cursor.insertText(logic.INDENT_CHAR * level)
         self.setTextCursor(edit_cursor)
+        self._apply_hanging_indent(edit_cursor.block())
         edit_cursor.endEditBlock()
 
     # ------------------------------------------------------------------
@@ -158,6 +181,7 @@ class OutlineEditor(QPlainTextEdit):
         place_cursor = QTextCursor(self.document())
         place_cursor.setPosition(block.position() + new_col)
         self.setTextCursor(place_cursor)
+        self._apply_hanging_indent(block)
         edit_cursor.endEditBlock()
 
     # ------------------------------------------------------------------
@@ -209,6 +233,7 @@ class OutlineEditor(QPlainTextEdit):
         line_cursor = QTextCursor(block)
         line_cursor.select(QTextCursor.SelectionType.LineUnderCursor)
         line_cursor.insertText(new_text)
+        self._apply_hanging_indent(block)
         return True
 
     def _reposition_after_indent_delta(self, block: QTextBlock, saved_col: int, delta: int) -> None:
@@ -304,6 +329,34 @@ class OutlineEditor(QPlainTextEdit):
     # ------------------------------------------------------------------
     # Alt+Up/Down (move line) and Ctrl+Alt+Up/Down (move line + subtree)
     # ------------------------------------------------------------------
+    def _subtree_end(self, first: QTextBlock, base_level: int) -> QTextBlock:
+        """Walk forward from `first`, returning the last block in its
+        subtree (deeper-level lines). Sees through the blank-line
+        separator that normally sits between a parent and its first
+        child (or between any two differing levels) - without this, the
+        walk would stop at that blank, since a blank's own level (0)
+        never exceeds base_level. A blank only continues the subtree if
+        something deeper than base_level follows it; otherwise it's the
+        subtree's trailing terminator, not part of it.
+        """
+        last = first
+        block = first.next()
+        while block.isValid():
+            if block.text() == "":
+                peek = block
+                while peek.isValid() and peek.text() == "":
+                    peek = peek.next()
+                if peek.isValid() and logic.indent_level(peek.text()) > base_level:
+                    block = peek
+                    continue
+                break
+            if logic.indent_level(block.text()) > base_level:
+                last = block
+                block = block.next()
+                continue
+            break
+        return last
+
     def _move_lines(self, direction: int, with_subtree: bool) -> None:
         cursor = self.textCursor()
         first = cursor.block()
@@ -312,23 +365,28 @@ class OutlineEditor(QPlainTextEdit):
 
         last = first
         if with_subtree:
-            nxt = first.next()
-            while nxt.isValid() and logic.indent_level(nxt.text()) > base_level:
-                last = nxt
-                nxt = nxt.next()
+            last = self._subtree_end(first, base_level)
 
+        # The real neighbor to swap with is the next/previous *content*
+        # line - skip past any blank separators in between. Those blanks
+        # belonged to the old adjacency and are stale once the move
+        # happens; they get replaced away below and the invariant is
+        # re-run fresh at both new seams, rather than being carried along
+        # or left behind as orphaned blank lines.
         if direction < 0:
             neighbor = first.previous()
+            while neighbor.isValid() and neighbor.text() == "":
+                neighbor = neighbor.previous()
             if not neighbor.isValid():
                 return
             span_start_block, span_end_block = neighbor, last
-            moved_first_offset = 0
         else:
             neighbor = last.next()
+            while neighbor.isValid() and neighbor.text() == "":
+                neighbor = neighbor.next()
             if not neighbor.isValid():
                 return
             span_start_block, span_end_block = first, neighbor
-            moved_first_offset = len(neighbor.text()) + 1  # neighbor line + its newline
 
         moving_texts = []
         b = first
@@ -341,8 +399,10 @@ class OutlineEditor(QPlainTextEdit):
 
         if direction < 0:
             new_span_text = moving_block + "\n" + neighbor.text()
+            user_line_offset_from_head = 0  # first's content lands at the head
         else:
             new_span_text = neighbor.text() + "\n" + moving_block
+            user_line_offset_from_head = 1  # first's content lands right after neighbor
 
         after_span_end = span_end_block.next()
         if after_span_end.isValid():
@@ -359,9 +419,45 @@ class OutlineEditor(QPlainTextEdit):
         edit_cursor = self.textCursor()
         edit_cursor.beginEditBlock()
         select_cursor.insertText(new_span_text)
+
+        # The replaced region always has len(moving_texts) + 1 blocks
+        # (the moving lines plus neighbor), regardless of direction or
+        # which chunk landed first. Track the region's head/tail blocks -
+        # the two new seams created by the swap - and `first`'s own new
+        # line (for restoring the cursor), all via live QTextCursor
+        # instances captured now so they auto-adjust through the
+        # blank-line fixes below.
+        head_block = self.document().findBlock(span_start_pos)
+        tail_block = head_block
+        for _ in range(len(moving_texts)):
+            tail_block = tail_block.next()
+        user_line_block = head_block
+        for _ in range(user_line_offset_from_head):
+            user_line_block = user_line_block.next()
+
+        tail_tracker = QTextCursor(tail_block)
+        user_line_tracker = QTextCursor(user_line_block)
+        user_line_tracker.setPosition(
+            user_line_block.position() + min(saved_col, len(user_line_block.text()))
+        )
+
+        head_cursor = QTextCursor(head_block)
+        self.setTextCursor(head_cursor)
+        self._apply_blank_line_logic()
+
+        self.setTextCursor(tail_tracker)
+        self._apply_blank_line_logic()
+
+        # Formats aren't reliably preserved across a bulk text replace -
+        # reformat every block in the final (post-blank-fix) region.
+        b = self.document().findBlock(span_start_pos)
+        final_tail = tail_tracker.block()
+        while True:
+            self._apply_hanging_indent(b)
+            if b.blockNumber() == final_tail.blockNumber():
+                break
+            b = b.next()
+
         edit_cursor.endEditBlock()
 
-        new_pos = span_start_pos + moved_first_offset + saved_col
-        place_cursor = QTextCursor(self.document())
-        place_cursor.setPosition(min(new_pos, self.document().characterCount() - 1))
-        self.setTextCursor(place_cursor)
+        self.setTextCursor(user_line_tracker)

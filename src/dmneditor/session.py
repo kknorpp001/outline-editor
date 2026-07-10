@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QStandardPaths, QTimer
-from PySide6.QtWidgets import QPlainTextEdit
+from PySide6.QtWidgets import QTextEdit
 
 AUTOSAVE_INTERVAL_MS = 5000
 
@@ -106,7 +106,7 @@ def load_autosave_text(doc_session: DocumentSession) -> Optional[str]:
 class SessionManager:
     """Owns the autosave timer + recovery-slot bookkeeping for one open document."""
 
-    def __init__(self, editor: QPlainTextEdit, doc_session: DocumentSession):
+    def __init__(self, editor: QTextEdit, doc_session: DocumentSession):
         self.editor = editor
         self.doc_session = doc_session
         self._timer = QTimer()
