@@ -151,6 +151,7 @@ class OutlineEditor(QTextEdit):
             edit_cursor.beginEditBlock()
             self._indent_single_line(-1)
             edit_cursor.endEditBlock()
+            self.ensureCursorVisible()
             return
 
         edit_cursor = self.textCursor()
@@ -160,7 +161,9 @@ class OutlineEditor(QTextEdit):
             edit_cursor.insertText(logic.INDENT_CHAR * level)
         self.setTextCursor(edit_cursor)
         self._apply_hanging_indent(edit_cursor.block())
+        self._apply_blank_line_logic(edit_cursor.block())
         edit_cursor.endEditBlock()
+        self.ensureCursorVisible()
 
     # ------------------------------------------------------------------
     # Ctrl+T: insert/refresh timestamp in place
@@ -196,6 +199,7 @@ class OutlineEditor(QTextEdit):
         else:
             self._indent_single_line(delta)
         edit_cursor.endEditBlock()
+        self.ensureCursorVisible()
 
     def _indent_multi_line_selection(self, cursor: QTextCursor, delta: int) -> None:
         # Multi-line selection: indent/outdent every touched line. No
@@ -218,7 +222,7 @@ class OutlineEditor(QTextEdit):
         saved_col = cursor.positionInBlock()
         if self._set_block_indent(block, delta):
             self._reposition_after_indent_delta(block, saved_col, delta)
-        self._apply_blank_line_logic()
+        self._apply_blank_line_logic(block)
 
     def _set_block_indent(self, block: QTextBlock, delta: int) -> bool:
         """Add/remove one leading tab. Returns False (no-op) if outdenting
@@ -254,11 +258,21 @@ class OutlineEditor(QTextEdit):
             return False
         block = cursor.block()
         indent_len = logic.indent_prefix_len(block.text())
+
+        if indent_len == 0:
+            # At the very start of an unindented line, Qt's default
+            # Backspace would merge it into the line above - which can eat
+            # a blank-line separator the format invariant requires, or
+            # splice two independently-timestamped entries onto one line.
+            # Block it there; anywhere else on the line, ordinary
+            # character-by-character deletion is unaffected.
+            return cursor.positionInBlock() == 0
+
         # Triggers whenever the cursor sits within/at the end of the
         # leading-tab run (not strictly column 0) - this is where the
         # cursor naturally rests right after pressing Tab, and backspace
         # there is the natural "undo that indent" gesture.
-        if indent_len == 0 or cursor.positionInBlock() > indent_len:
+        if cursor.positionInBlock() > indent_len:
             return False
 
         saved_col = cursor.positionInBlock()
@@ -266,21 +280,28 @@ class OutlineEditor(QTextEdit):
         edit_cursor.beginEditBlock()
         if self._set_block_indent(block, -1):
             self._reposition_after_indent_delta(block, saved_col, -1)
-        self._apply_blank_line_logic()
+        self._apply_blank_line_logic(block)
         edit_cursor.endEditBlock()
+        self.ensureCursorVisible()
         return True
 
     # ------------------------------------------------------------------
     # auto blank-line-on-indent-change (shared by Tab/Shift+Tab/Backspace-outdent)
     # ------------------------------------------------------------------
-    def _apply_blank_line_logic(self) -> None:
+    def _apply_blank_line_logic(self, block: QTextBlock) -> None:
         """Maintain the invariant "a blank line separates two lines only
         when their indent levels differ" on both sides of the line whose
         level just changed - inserting a missing separator or removing one
         that's now redundant, regardless of whether the line has content.
+
+        Takes the target block explicitly rather than reading
+        self.textCursor(), so callers never have to reposition the
+        widget's actual cursor just to point this at a line - doing that
+        mid-edit is what used to cause Qt to scroll the viewport to a
+        stray intermediate position (see _move_lines).
         """
-        block = self.textCursor().block()
         new_level = logic.indent_level(block.text())
+        tracker = QTextCursor(block)
 
         prev = block.previous()
         prev_text = prev.text() if prev.isValid() else None
@@ -289,9 +310,10 @@ class OutlineEditor(QTextEdit):
         above_action = logic.compute_blank_line_action(new_level, prev_text, prev_prev_text)
         self._apply_blank_action_above(block, above_action)
 
-        # Re-fetch: the "above" action may have shifted this line's block
-        # number. `self.textCursor()` auto-adjusted across that edit.
-        block = self.textCursor().block()
+        # Re-fetch via the tracker: the "above" action may have shifted
+        # this line's block number, and a live QTextCursor auto-adjusts
+        # across that edit even though it's not the widget's own cursor.
+        block = tracker.block()
         nxt = block.next()
         next_text = nxt.text() if nxt.isValid() else None
         next_next = nxt.next() if nxt.isValid() else None
@@ -441,12 +463,12 @@ class OutlineEditor(QTextEdit):
             user_line_block.position() + min(saved_col, len(user_line_block.text()))
         )
 
-        head_cursor = QTextCursor(head_block)
-        self.setTextCursor(head_cursor)
-        self._apply_blank_line_logic()
-
-        self.setTextCursor(tail_tracker)
-        self._apply_blank_line_logic()
+        # Fix up the blank-line invariant at both new seams without ever
+        # repositioning the widget's own cursor mid-edit - doing that via
+        # setTextCursor here used to make Qt scroll the viewport to a
+        # stray intermediate position before the move had even finished.
+        self._apply_blank_line_logic(head_block)
+        self._apply_blank_line_logic(tail_tracker.block())
 
         # Formats aren't reliably preserved across a bulk text replace -
         # reformat every block in the final (post-blank-fix) region.
@@ -461,3 +483,4 @@ class OutlineEditor(QTextEdit):
         edit_cursor.endEditBlock()
 
         self.setTextCursor(user_line_tracker)
+        self.ensureCursorVisible()
