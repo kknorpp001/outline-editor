@@ -159,10 +159,16 @@ class OutlineEditor(QTextEdit):
         edit_cursor.insertBlock()
         if level > 0:
             edit_cursor.insertText(logic.INDENT_CHAR * level)
-        self.setTextCursor(edit_cursor)
         self._apply_hanging_indent(edit_cursor.block())
         self._apply_blank_line_logic(edit_cursor.block())
         edit_cursor.endEditBlock()
+        # Set the cursor and scroll to follow it only *after* endEditBlock:
+        # mid-edit-block the document layout is invalid, so setTextCursor's
+        # internal ensureCursorVisible resolves the cursor to y=0 and yanks
+        # the viewport to the top - after which the explicit
+        # ensureCursorVisible below scrolls back the minimum amount, landing
+        # the new line on the bottom row instead of leaving it in place.
+        self.setTextCursor(edit_cursor)
         self.ensureCursorVisible()
 
     # ------------------------------------------------------------------
