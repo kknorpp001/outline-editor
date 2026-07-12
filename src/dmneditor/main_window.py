@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
             self.editor.set_document_text(recovered_text)
             self.editor.document().setModified(True)
             self._current_path = doc_session.real_path
+            self.editor.restore_cursor_position(doc_session.cursor_pos)
             return doc_session
         # Always route through set_document_text, even for a blank new
         # document, so the trailing-newline normalization (and the

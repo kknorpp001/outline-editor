@@ -77,6 +77,18 @@ class OutlineEditor(QTextEdit):
         self.document().clearUndoRedoStacks()
         self.document().setModified(False)
 
+    def restore_cursor_position(self, position: int) -> None:
+        """Place the caret at a saved character offset (clamped to the current
+        document) and scroll it into view. The scroll is deferred a tick
+        because right after set_document_text the widget hasn't laid out or
+        sized its scrollbar yet, so an immediate scroll-to-cursor is a no-op.
+        """
+        max_pos = self.document().characterCount() - 1
+        cursor = self.textCursor()
+        cursor.setPosition(max(0, min(int(position), max_pos)))
+        self.setTextCursor(cursor)
+        QTimer.singleShot(0, self.ensureCursorVisible)
+
     def _apply_hanging_indent(self, block: QTextBlock) -> None:
         """Wrapped continuation lines align under where this line's actual
         text starts - after its leading tabs and, if present, its

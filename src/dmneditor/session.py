@@ -72,14 +72,24 @@ class DocumentSession:
         self.real_path = real_path
         self.autosave_id = autosave_id or str(uuid.uuid4())
         self.dirty = False
+        # Caret character offset, so a recovered document reopens scrolled to
+        # where you left off instead of at the top.
+        self.cursor_pos = 0
 
     def to_dict(self) -> dict:
-        return {"real_path": self.real_path, "autosave_id": self.autosave_id, "dirty": self.dirty}
+        return {
+            "real_path": self.real_path,
+            "autosave_id": self.autosave_id,
+            "dirty": self.dirty,
+            "cursor_pos": self.cursor_pos,
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> "DocumentSession":
         s = cls(real_path=d.get("real_path"), autosave_id=d.get("autosave_id"))
         s.dirty = bool(d.get("dirty", False))
+        # Default 0 keeps slots written before this feature working.
+        s.cursor_pos = int(d.get("cursor_pos") or 0)
         return s
 
 
@@ -119,6 +129,7 @@ class SessionManager:
             self.flush()
 
     def flush(self) -> None:
+        self.doc_session.cursor_pos = self.editor.textCursor().position()
         _atomic_write(_autosave_path(self.doc_session.autosave_id), self.editor.toPlainText())
         self.doc_session.dirty = True
         self._persist_entry()
@@ -138,6 +149,7 @@ class SessionManager:
     def close(self) -> None:
         """Force-flush so a window close never races the autosave timer."""
         self._timer.stop()
+        self.doc_session.cursor_pos = self.editor.textCursor().position()
         if self.editor.document().isModified():
             self.flush()
         else:

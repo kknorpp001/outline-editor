@@ -30,6 +30,21 @@ def test_document_session_dict_roundtrip():
     assert s2.dirty == s.dirty
 
 
+def test_document_session_persists_cursor_pos():
+    s = session.DocumentSession(real_path="C:/notes.txt")
+    s.cursor_pos = 42
+    s2 = session.DocumentSession.from_dict(s.to_dict())
+    assert s2.cursor_pos == 42
+
+
+def test_document_session_cursor_pos_defaults_zero_for_legacy_slots():
+    # Slots written before this feature have no cursor_pos key.
+    s = session.DocumentSession.from_dict(
+        {"real_path": None, "autosave_id": "x", "dirty": True}
+    )
+    assert s.cursor_pos == 0
+
+
 def test_no_pending_recovery_when_session_file_absent():
     assert session.pending_recovery_slots() == []
 
