@@ -60,10 +60,10 @@ class OutlineEditor(QTextEdit):
         # re-entrancy that setBlockFormat -> contentsChanged would cause.
         self._compressed = False
         self._compressing = False
-        # Screen-Y of the caret captured at the start of a zoom "burst", so
-        # the deferred re-anchor can put the caret back where it was even
-        # across several rapid Ctrl+wheel steps. None = no zoom pending.
-        self._zoom_anchor_y = None
+        # Screen-Y of the caret captured at the start of a view-preserving
+        # layout change (zoom, compress toggle), so the deferred re-anchor can
+        # restore it - even across a rapid burst. None = nothing pending.
+        self._caret_anchor_y = None
         self.document().contentsChanged.connect(self._on_contents_changed)
 
     def set_document_text(self, text: str) -> None:
@@ -185,13 +185,9 @@ class OutlineEditor(QTextEdit):
         size = max(MIN_FONT_POINT_SIZE, min(size, MAX_FONT_POINT_SIZE))
         if size == self._font_point_size:
             return
-        # Pin the caret's on-screen vertical position: zooming should grow or
-        # shrink the text *around* the cursor, not scroll the viewport off to
-        # a different part of the document. Capture the caret's screen-Y now,
-        # while the pre-zoom layout is still valid; only on the first step of
-        # a rapid burst (later steps re-anchor to that same original spot).
-        if self._zoom_anchor_y is None:
-            self._zoom_anchor_y = self.cursorRect().top()
+        # Keep the caret's on-screen position steady so the text grows/shrinks
+        # around the cursor instead of scrolling the viewport elsewhere.
+        self._anchor_caret()
         self._font_point_size = size
         font = self.font()
         font.setPointSize(size)
@@ -207,17 +203,26 @@ class OutlineEditor(QTextEdit):
             block = block.next()
         self.document().setModified(was_modified)
         settings.save_font_point_size(size)
-        # Defer the re-anchor to the next event-loop tick: a shown widget lays
-        # out the new font size and updates the scrollbar range asynchronously,
-        # so correcting the scroll synchronously here reads stale geometry and
-        # clamps against the old, shorter range - and the view still jumps.
-        QTimer.singleShot(0, self._reanchor_after_zoom)
 
-    def _reanchor_after_zoom(self) -> None:
-        if self._zoom_anchor_y is None:
+    # ------------------------------------------------------------------
+    # caret anchoring: keep the viewport pinned to the caret across a layout
+    # change (zoom, compress toggle) whose relayout is applied asynchronously
+    # ------------------------------------------------------------------
+    def _anchor_caret(self) -> None:
+        """Capture the caret's on-screen Y (once per burst) and schedule the
+        re-anchor for the next event-loop tick. A shown widget lays out and
+        updates its scrollbar range asynchronously, so correcting the scroll
+        synchronously reads stale geometry and clamps against the old range,
+        leaving the view jumped."""
+        if self._caret_anchor_y is None:
+            self._caret_anchor_y = self.cursorRect().top()
+        QTimer.singleShot(0, self._reanchor_caret)
+
+    def _reanchor_caret(self) -> None:
+        if self._caret_anchor_y is None:
             return
-        anchor_y = self._zoom_anchor_y
-        self._zoom_anchor_y = None
+        anchor_y = self._caret_anchor_y
+        self._caret_anchor_y = None
         vbar = self.verticalScrollBar()
         vbar.setValue(vbar.value() + self.cursorRect().top() - anchor_y)
 
@@ -225,6 +230,11 @@ class OutlineEditor(QTextEdit):
     # compress: collapse blank separator lines (view-only; text untouched)
     # ------------------------------------------------------------------
     def toggle_compress(self) -> None:
+        # Anchor the caret so collapsing/expanding the blank lines above it
+        # doesn't scroll the view away (same deferred re-anchor as zoom). Only
+        # the explicit toggle anchors - the contentsChanged reapply must not,
+        # or it would fight normal cursor movement while editing.
+        self._anchor_caret()
         self._compressed = not self._compressed
         self._apply_compression_pass()
 
