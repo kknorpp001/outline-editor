@@ -181,6 +181,11 @@ class OutlineEditor(QTextEdit):
         size = max(MIN_FONT_POINT_SIZE, min(size, MAX_FONT_POINT_SIZE))
         if size == self._font_point_size:
             return
+        # Pin the caret's on-screen vertical position: zooming should grow or
+        # shrink the text *around* the cursor, not scroll the viewport off to
+        # a different part of the document (the relayout below otherwise
+        # leaves the scrollbar at a value that now points elsewhere).
+        anchor_y = self.cursorRect().top()
         self._font_point_size = size
         font = self.font()
         font.setPointSize(size)
@@ -195,6 +200,9 @@ class OutlineEditor(QTextEdit):
             self._apply_hanging_indent(block)
             block = block.next()
         self.document().setModified(was_modified)
+        # Re-anchor after the layout has settled at the new font size.
+        vbar = self.verticalScrollBar()
+        vbar.setValue(vbar.value() + self.cursorRect().top() - anchor_y)
         settings.save_font_point_size(size)
 
     # ------------------------------------------------------------------
