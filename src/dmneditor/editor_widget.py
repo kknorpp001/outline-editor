@@ -108,7 +108,16 @@ class OutlineEditor(QTextEdit):
             return
         self._pending_cursor_scroll = False
         # One tick after show so the post-show resize/layout has completed.
-        QTimer.singleShot(0, self.ensureCursorVisible)
+        QTimer.singleShot(0, self._center_cursor)
+
+    def _center_cursor(self) -> None:
+        """Scroll so the caret's line sits at the vertical center of the
+        viewport. setValue clamps to the scroll range, so near the top or
+        bottom of the document it simply pins there instead of centering.
+        """
+        vbar = self.verticalScrollBar()
+        caret_center_doc_y = self.cursorRect().center().y() + vbar.value()
+        vbar.setValue(caret_center_doc_y - self.viewport().height() // 2)
 
     def _apply_hanging_indent(self, block: QTextBlock) -> None:
         """Wrapped continuation lines align under where this line's actual
