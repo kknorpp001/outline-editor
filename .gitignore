@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Personal outline notes stay out of the code repo
+*.txt
+!requirements.txt

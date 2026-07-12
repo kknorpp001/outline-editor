@@ -9,13 +9,32 @@ from __future__ import annotations
 from datetime import datetime
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QKeyEvent, QTextBlock, QTextBlockFormat, QTextCursor
+from PySide6.QtGui import (
+    QFont,
+    QKeyEvent,
+    QTextBlock,
+    QTextBlockFormat,
+    QTextCursor,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import QTextEdit
 
-from . import logic
+from . import logic, settings
 
 FONT_FAMILY = "Consolas"
 FONT_POINT_SIZE = 18
+MIN_FONT_POINT_SIZE = 6
+MAX_FONT_POINT_SIZE = 72
+
+# When "compress" is on, blank separator lines are collapsed to a sliver of
+# their normal height so long branches fit on screen - the blank characters
+# stay in the document (and on disk) untouched; only their on-screen line
+# height changes.
+COMPRESSED_LINE_HEIGHT = 1  # percent of normal, via ProportionalHeight
+# setLineHeight()/lineHeightType() traffic in plain ints, not the enum, so
+# pin the int values here (SingleHeight == 0 is Qt's "normal spacing" default).
+_LH_PROPORTIONAL = QTextBlockFormat.LineHeightTypes.ProportionalHeight.value
+_LH_SINGLE = QTextBlockFormat.LineHeightTypes.SingleHeight.value
 
 
 class OutlineEditor(QTextEdit):
@@ -24,7 +43,8 @@ class OutlineEditor(QTextEdit):
         self.setAcceptRichText(False)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
 
-        font = QFont(FONT_FAMILY, FONT_POINT_SIZE)
+        self._font_point_size = settings.load_font_point_size()
+        font = QFont(FONT_FAMILY, self._font_point_size)
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setFixedPitch(True)
         self.setFont(font)
@@ -33,6 +53,14 @@ class OutlineEditor(QTextEdit):
         # so an indented line's timestamp visually lines up with the first
         # word of the line above it.
         self.setTabStopDistance(self.fontMetrics().horizontalAdvance("00:00a "))
+
+        # "Compress" view state (collapse blank separator lines). Reapplied
+        # after every content change while active, so blanks created by
+        # editing get collapsed too; _compressing guards against the
+        # re-entrancy that setBlockFormat -> contentsChanged would cause.
+        self._compressed = False
+        self._compressing = False
+        self.document().contentsChanged.connect(self._on_contents_changed)
 
     def set_document_text(self, text: str) -> None:
         if not text.endswith("\n"):
@@ -75,6 +103,25 @@ class OutlineEditor(QTextEdit):
             event.accept()
             return
 
+        if ctrl and not alt and not shift:
+            if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+                self.zoom_in()
+                event.accept()
+                return
+            if key == Qt.Key.Key_Minus:
+                self.zoom_out()
+                event.accept()
+                return
+            if key == Qt.Key.Key_0:
+                self.reset_zoom()
+                event.accept()
+                return
+
+        if key == Qt.Key.Key_C and ctrl and shift and not alt:
+            self.toggle_compress()
+            event.accept()
+            return
+
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not ctrl and not alt and not shift:
             self._handle_enter()
             event.accept()
@@ -106,6 +153,89 @@ class OutlineEditor(QTextEdit):
                 return
 
         super().keyPressEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in()
+            elif delta < 0:
+                self.zoom_out()
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    # ------------------------------------------------------------------
+    # zoom (font size): Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+wheel
+    # ------------------------------------------------------------------
+    def zoom_in(self) -> None:
+        self._set_font_point_size(self._font_point_size + 1)
+
+    def zoom_out(self) -> None:
+        self._set_font_point_size(self._font_point_size - 1)
+
+    def reset_zoom(self) -> None:
+        self._set_font_point_size(FONT_POINT_SIZE)
+
+    def _set_font_point_size(self, size: int) -> None:
+        size = max(MIN_FONT_POINT_SIZE, min(size, MAX_FONT_POINT_SIZE))
+        if size == self._font_point_size:
+            return
+        self._font_point_size = size
+        font = self.font()
+        font.setPointSize(size)
+        self.setFont(font)
+        # Tab stop distance and every block's hanging-indent margin are
+        # derived from font metrics, so both must be recomputed when the
+        # font size changes - otherwise indentation drifts out of alignment.
+        self.setTabStopDistance(self.fontMetrics().horizontalAdvance("00:00a "))
+        was_modified = self.document().isModified()
+        block = self.document().begin()
+        while block.isValid():
+            self._apply_hanging_indent(block)
+            block = block.next()
+        self.document().setModified(was_modified)
+        settings.save_font_point_size(size)
+
+    # ------------------------------------------------------------------
+    # compress: collapse blank separator lines (view-only; text untouched)
+    # ------------------------------------------------------------------
+    def toggle_compress(self) -> None:
+        self._compressed = not self._compressed
+        self._apply_compression_pass()
+
+    def _on_contents_changed(self) -> None:
+        if self._compressed:
+            self._apply_compression_pass()
+
+    def _apply_compression_pass(self) -> None:
+        if self._compressing:
+            return
+        self._compressing = True
+        try:
+            was_modified = self.document().isModified()
+            block = self.document().begin()
+            while block.isValid():
+                self._set_block_compressed(block, self._compressed and block.text() == "")
+                block = block.next()
+            # A pure view toggle must never dirty the document (that would
+            # trip autosave/recovery); restore whatever the flag was before.
+            self.document().setModified(was_modified)
+        finally:
+            self._compressing = False
+
+    def _set_block_compressed(self, block: QTextBlock, compressed: bool) -> None:
+        if compressed:
+            height, height_type = COMPRESSED_LINE_HEIGHT, _LH_PROPORTIONAL
+        else:
+            height, height_type = 0, _LH_SINGLE
+        fmt = block.blockFormat()
+        # Skip redundant writes - each setBlockFormat re-emits contentsChanged
+        # and would otherwise fire on every keystroke for every blank line.
+        if fmt.lineHeight() == height and int(fmt.lineHeightType()) == int(height_type):
+            return
+        fmt.setLineHeight(height, height_type)
+        QTextCursor(block).setBlockFormat(fmt)
 
     # ------------------------------------------------------------------
     # timestamp: first keystroke auto-insert

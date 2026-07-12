@@ -17,7 +17,11 @@ from .editor_widget import OutlineEditor
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(
+        self,
+        doc_session: Optional[session.DocumentSession] = None,
+        recovered_text: Optional[str] = None,
+    ):
         super().__init__()
         self.resize(900, 700)
 
@@ -25,7 +29,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.editor)
 
         self._current_path: Optional[str] = None
-        self._doc_session = self._init_session()
+        self._doc_session = self._init_session(doc_session, recovered_text)
         self._session_manager = session.SessionManager(self.editor, self._doc_session)
 
         self.editor.document().modificationChanged.connect(self._update_title)
@@ -34,16 +38,20 @@ class MainWindow(QMainWindow):
         self._update_title()
 
     # ------------------------------------------------------------------
-    def _init_session(self) -> session.DocumentSession:
-        recoverable = session.pending_recovery_slots()
-        if recoverable:
-            doc_session = recoverable[0]
-            text = session.load_autosave_text(doc_session)
-            if text is not None:
-                self.editor.set_document_text(text)
-                self.editor.document().setModified(True)
-                self._current_path = doc_session.real_path
-                return doc_session
+    def _init_session(
+        self,
+        doc_session: Optional[session.DocumentSession],
+        recovered_text: Optional[str],
+    ) -> session.DocumentSession:
+        # Recovery slot selection now happens once, at startup, in
+        # open_startup_windows() - which opens one window per recoverable
+        # document. This window just loads whatever it was handed (or a
+        # blank doc when nothing was).
+        if doc_session is not None and recovered_text is not None:
+            self.editor.set_document_text(recovered_text)
+            self.editor.document().setModified(True)
+            self._current_path = doc_session.real_path
+            return doc_session
         # Always route through set_document_text, even for a blank new
         # document, so the trailing-newline normalization (and the
         # reorder-safe sentinel block it guarantees) always applies.
@@ -77,6 +85,45 @@ class MainWindow(QMainWindow):
         save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_as_action.triggered.connect(self.save_file_as)
         file_menu.addAction(save_as_action)
+
+        self._build_shortcuts_menu()
+
+    def _build_shortcuts_menu(self) -> None:
+        """A read-only cheat sheet of every keybinding, sitting to the right
+        of the File menu. Entries are disabled QActions - they're reference
+        text, not commands, and the real bindings live in the editor's key
+        funnel / File menu.
+        """
+        menu = self.menuBar().addMenu("&Shortcuts")
+        groups = [
+            ("File", [
+                ("Ctrl+N", "New"),
+                ("Ctrl+O", "Open"),
+                ("Ctrl+S", "Save"),
+                ("Ctrl+Shift+S", "Save As"),
+            ]),
+            ("Editing", [
+                ("Enter", "New line (carry indent; 2nd Enter on empty line outdents)"),
+                ("Tab", "Indent line / selection"),
+                ("Shift+Tab", "Outdent line / selection"),
+                ("Backspace", "Outdent (at start of an indented line)"),
+                ("Ctrl+T", "Insert / refresh timestamp"),
+                ("Alt+Up / Alt+Down", "Move line up / down"),
+                ("Ctrl+Alt+Up / Down", "Move line + its subtree"),
+            ]),
+            ("View", [
+                ("Ctrl+Shift+C", "Compress: collapse blank lines (toggle)"),
+                ("Ctrl+= / Ctrl+-", "Zoom in / out (font size)"),
+                ("Ctrl+0", "Reset zoom"),
+                ("Ctrl+Mouse Wheel", "Zoom in / out"),
+            ]),
+        ]
+        for title, entries in groups:
+            menu.addSection(title)
+            for keys, desc in entries:
+                action = QAction(f"{keys}  -  {desc}", self)
+                action.setEnabled(False)
+                menu.addAction(action)
 
     # ------------------------------------------------------------------
     def _update_title(self, *_args) -> None:
@@ -134,3 +181,24 @@ class MainWindow(QMainWindow):
         settings.save_geometry(self.saveGeometry())
         self._retire_current_session()
         event.accept()
+
+
+def open_startup_windows() -> list["MainWindow"]:
+    """Recover *every* unsaved document left over from the previous run -
+    one window each - instead of only the first.
+
+    The old path recovered just recoverable[0], silently orphaning any
+    second-or-later dirty document. With more than one unsaved doc that made
+    a newer document appear to be "replaced" by an older one on restart (the
+    newer one was still safe on disk, just never surfaced). If nothing is
+    recoverable, open a single blank window.
+    """
+    windows: list[MainWindow] = []
+    for doc_session in session.pending_recovery_slots():
+        text = session.load_autosave_text(doc_session)
+        if text is None:
+            continue  # autosave file gone - nothing to restore for this slot
+        windows.append(MainWindow(doc_session=doc_session, recovered_text=text))
+    if not windows:
+        windows.append(MainWindow())
+    return windows
