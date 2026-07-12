@@ -155,6 +155,14 @@ class SessionManager:
         else:
             self._persist_entry()
 
+    def discard(self) -> None:
+        """Throw this document away: stop autosaving, then drop its recovery
+        slot and autosave file. Unlike close(), this never flushes - the whole
+        point is that the content is being deliberately discarded, so the timer
+        must stop first or it would resurrect the slot on its next tick."""
+        self._timer.stop()
+        self.forget()
+
     def forget(self) -> None:
         """Drop this slot entirely - used when there's nothing worth recovering."""
         data = _load_session_file()

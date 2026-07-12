@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
-from PySide6.QtWidgets import QFileDialog, QMainWindow
+from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox
 
 from . import session, settings
 from .editor_widget import OutlineEditor
@@ -87,6 +87,12 @@ class MainWindow(QMainWindow):
         save_as_action.triggered.connect(self.save_file_as)
         file_menu.addAction(save_as_action)
 
+        file_menu.addSeparator()
+        discard_action = QAction("&Discard (no recovery)", self)
+        discard_action.setShortcut(QKeySequence("Ctrl+Shift+W"))
+        discard_action.triggered.connect(self.discard_document)
+        file_menu.addAction(discard_action)
+
         self._build_shortcuts_menu()
 
     def _build_shortcuts_menu(self) -> None:
@@ -102,6 +108,7 @@ class MainWindow(QMainWindow):
                 ("Ctrl+O", "Open"),
                 ("Ctrl+S", "Save"),
                 ("Ctrl+Shift+S", "Save As"),
+                ("Ctrl+Shift+W", "Discard document (no recovery)"),
             ]),
             ("Editing", [
                 ("Enter", "New line (carry indent; 2nd Enter on empty line outdents)"),
@@ -139,6 +146,27 @@ class MainWindow(QMainWindow):
 
     def new_file(self) -> None:
         self._retire_current_session()
+        self._current_path = None
+        self.editor.set_document_text("")
+        self._doc_session = session.DocumentSession()
+        self._session_manager = session.SessionManager(self.editor, self._doc_session)
+        self._update_title()
+
+    def discard_document(self) -> None:
+        """Throw the current document away without keeping it recoverable, then
+        start a fresh blank one. For abandoned scratch outlines that would
+        otherwise reopen on every launch. Confirms first (Enter discards, Esc
+        cancels) since the content is gone for good afterward."""
+        reply = QMessageBox.warning(
+            self,
+            "Discard document",
+            "Discard this document? It will not be recoverable.",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Discard,
+        )
+        if reply != QMessageBox.StandardButton.Discard:
+            return
+        self._session_manager.discard()
         self._current_path = None
         self.editor.set_document_text("")
         self._doc_session = session.DocumentSession()
