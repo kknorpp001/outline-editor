@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import (
     QFont,
     QKeyEvent,
+    QShowEvent,
     QTextBlock,
     QTextBlockFormat,
     QTextCursor,
@@ -64,6 +65,9 @@ class OutlineEditor(QTextEdit):
         # layout change (zoom, compress toggle), so the deferred re-anchor can
         # restore it - even across a rapid burst. None = nothing pending.
         self._caret_anchor_y = None
+        # Set when a recovered caret position still needs to be scrolled into
+        # view - deferred until the widget is actually shown/laid out.
+        self._pending_cursor_scroll = False
         self.document().contentsChanged.connect(self._on_contents_changed)
 
     def set_document_text(self, text: str) -> None:
@@ -79,14 +83,31 @@ class OutlineEditor(QTextEdit):
 
     def restore_cursor_position(self, position: int) -> None:
         """Place the caret at a saved character offset (clamped to the current
-        document) and scroll it into view. The scroll is deferred a tick
-        because right after set_document_text the widget hasn't laid out or
-        sized its scrollbar yet, so an immediate scroll-to-cursor is a no-op.
+        document) and scroll it into view.
+
+        Setting the caret is immediate, but the scroll must wait until the
+        widget is actually shown and the document laid out - restore runs
+        during window construction, before show(), when the viewport has no
+        size and the document no layout, so ensureCursorVisible would be a
+        no-op and the view would stay pinned at the top. showEvent flushes it.
         """
         max_pos = self.document().characterCount() - 1
         cursor = self.textCursor()
         cursor.setPosition(max(0, min(int(position), max_pos)))
         self.setTextCursor(cursor)
+        self._pending_cursor_scroll = True
+        if self.isVisible():
+            self._flush_pending_cursor_scroll()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._flush_pending_cursor_scroll()
+
+    def _flush_pending_cursor_scroll(self) -> None:
+        if not self._pending_cursor_scroll:
+            return
+        self._pending_cursor_scroll = False
+        # One tick after show so the post-show resize/layout has completed.
         QTimer.singleShot(0, self.ensureCursorVisible)
 
     def _apply_hanging_indent(self, block: QTextBlock) -> None:
