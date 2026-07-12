@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import (
     QFont,
     QKeyEvent,
@@ -60,6 +60,10 @@ class OutlineEditor(QTextEdit):
         # re-entrancy that setBlockFormat -> contentsChanged would cause.
         self._compressed = False
         self._compressing = False
+        # Screen-Y of the caret captured at the start of a zoom "burst", so
+        # the deferred re-anchor can put the caret back where it was even
+        # across several rapid Ctrl+wheel steps. None = no zoom pending.
+        self._zoom_anchor_y = None
         self.document().contentsChanged.connect(self._on_contents_changed)
 
     def set_document_text(self, text: str) -> None:
@@ -183,9 +187,11 @@ class OutlineEditor(QTextEdit):
             return
         # Pin the caret's on-screen vertical position: zooming should grow or
         # shrink the text *around* the cursor, not scroll the viewport off to
-        # a different part of the document (the relayout below otherwise
-        # leaves the scrollbar at a value that now points elsewhere).
-        anchor_y = self.cursorRect().top()
+        # a different part of the document. Capture the caret's screen-Y now,
+        # while the pre-zoom layout is still valid; only on the first step of
+        # a rapid burst (later steps re-anchor to that same original spot).
+        if self._zoom_anchor_y is None:
+            self._zoom_anchor_y = self.cursorRect().top()
         self._font_point_size = size
         font = self.font()
         font.setPointSize(size)
@@ -200,10 +206,20 @@ class OutlineEditor(QTextEdit):
             self._apply_hanging_indent(block)
             block = block.next()
         self.document().setModified(was_modified)
-        # Re-anchor after the layout has settled at the new font size.
+        settings.save_font_point_size(size)
+        # Defer the re-anchor to the next event-loop tick: a shown widget lays
+        # out the new font size and updates the scrollbar range asynchronously,
+        # so correcting the scroll synchronously here reads stale geometry and
+        # clamps against the old, shorter range - and the view still jumps.
+        QTimer.singleShot(0, self._reanchor_after_zoom)
+
+    def _reanchor_after_zoom(self) -> None:
+        if self._zoom_anchor_y is None:
+            return
+        anchor_y = self._zoom_anchor_y
+        self._zoom_anchor_y = None
         vbar = self.verticalScrollBar()
         vbar.setValue(vbar.value() + self.cursorRect().top() - anchor_y)
-        settings.save_font_point_size(size)
 
     # ------------------------------------------------------------------
     # compress: collapse blank separator lines (view-only; text untouched)
