@@ -607,20 +607,44 @@ class OutlineEditor(QTextEdit):
         # happens; they get replaced away below and the invariant is
         # re-run fresh at both new seams, rather than being carried along
         # or left behind as orphaned blank lines.
+        # The unit we swap with is the adjacent *sibling subtree*, not just
+        # the single line next to us. A subtree move that only swapped with
+        # one line would drop the moving tree into the middle of the sibling
+        # beside it - adopting that sibling's trailing children (moving up) or
+        # stranding its own children behind (moving down). With subtree moves
+        # we step fully over the whole neighboring subtree; plain line moves
+        # keep the one-line neighbor.
         if direction < 0:
-            neighbor = first.previous()
-            while neighbor.isValid() and neighbor.text() == "":
-                neighbor = neighbor.previous()
-            if not neighbor.isValid():
+            nlast = first.previous()
+            while nlast.isValid() and nlast.text() == "":
+                nlast = nlast.previous()
+            if not nlast.isValid():
                 return
-            span_start_block, span_end_block = neighbor, last
+            nfirst = nlast
+            if with_subtree and logic.indent_level(nlast.text()) > base_level:
+                # nlast is deep inside the previous sibling's subtree; walk
+                # back to that sibling's head (the nearest line at or above
+                # base_level) so the whole subtree comes along.
+                probe = nlast.previous()
+                while probe.isValid():
+                    if probe.text() == "":
+                        probe = probe.previous()
+                        continue
+                    nfirst = probe
+                    if logic.indent_level(probe.text()) <= base_level:
+                        break
+                    probe = probe.previous()
+            span_start_block, span_end_block = nfirst, last
         else:
-            neighbor = last.next()
-            while neighbor.isValid() and neighbor.text() == "":
-                neighbor = neighbor.next()
-            if not neighbor.isValid():
+            nfirst = last.next()
+            while nfirst.isValid() and nfirst.text() == "":
+                nfirst = nfirst.next()
+            if not nfirst.isValid():
                 return
-            span_start_block, span_end_block = first, neighbor
+            nlast = nfirst
+            if with_subtree:
+                nlast = self._subtree_end(nfirst, logic.indent_level(nfirst.text()))
+            span_start_block, span_end_block = first, nlast
 
         moving_texts = []
         b = first
@@ -631,12 +655,22 @@ class OutlineEditor(QTextEdit):
             b = b.next()
         moving_block = "\n".join(moving_texts)
 
+        neighbor_texts = []
+        b = nfirst
+        while True:
+            neighbor_texts.append(b.text())
+            if b.blockNumber() == nlast.blockNumber():
+                break
+            b = b.next()
+        neighbor_block = "\n".join(neighbor_texts)
+
         if direction < 0:
-            new_span_text = moving_block + "\n" + neighbor.text()
+            new_span_text = moving_block + "\n" + neighbor_block
             user_line_offset_from_head = 0  # first's content lands at the head
         else:
-            new_span_text = neighbor.text() + "\n" + moving_block
-            user_line_offset_from_head = 1  # first's content lands right after neighbor
+            # first's content lands right after the whole neighbor subtree
+            new_span_text = neighbor_block + "\n" + moving_block
+            user_line_offset_from_head = len(neighbor_texts)
 
         after_span_end = span_end_block.next()
         if after_span_end.isValid():
@@ -654,38 +688,48 @@ class OutlineEditor(QTextEdit):
         edit_cursor.beginEditBlock()
         select_cursor.insertText(new_span_text)
 
-        # The replaced region always has len(moving_texts) + 1 blocks
-        # (the moving lines plus neighbor), regardless of direction or
-        # which chunk landed first. Track the region's head/tail blocks -
-        # the two new seams created by the swap - and `first`'s own new
-        # line (for restoring the cursor), all via live QTextCursor
-        # instances captured now so they auto-adjust through the
+        # The replaced region is the two swapped units back to back:
+        # len(moving_texts) + len(neighbor_texts) blocks, with the separator
+        # blanks dropped (they get regenerated below). The swap creates seams
+        # at three places - the top of the region, the junction between the
+        # two units, and the bottom - so track those three blocks, plus
+        # `first`'s own new line (for restoring the cursor), all via live
+        # QTextCursor instances captured now so they auto-adjust through the
         # blank-line fixes below.
         head_block = self.document().findBlock(span_start_pos)
-        tail_block = head_block
-        for _ in range(len(moving_texts)):
-            tail_block = tail_block.next()
+        first_unit_len = len(moving_texts) if direction < 0 else len(neighbor_texts)
+        total_len = len(moving_texts) + len(neighbor_texts)
+
+        junction_block = head_block
+        for _ in range(first_unit_len):
+            junction_block = junction_block.next()
+        bottom_block = head_block
+        for _ in range(total_len - 1):
+            bottom_block = bottom_block.next()
         user_line_block = head_block
         for _ in range(user_line_offset_from_head):
             user_line_block = user_line_block.next()
 
-        tail_tracker = QTextCursor(tail_block)
+        junction_tracker = QTextCursor(junction_block)
+        bottom_tracker = QTextCursor(bottom_block)
         user_line_tracker = QTextCursor(user_line_block)
         user_line_tracker.setPosition(
             user_line_block.position() + min(saved_col, len(user_line_block.text()))
         )
 
-        # Fix up the blank-line invariant at both new seams without ever
+        # Fix up the blank-line invariant at each new seam without ever
         # repositioning the widget's own cursor mid-edit - doing that via
         # setTextCursor here used to make Qt scroll the viewport to a
         # stray intermediate position before the move had even finished.
+        # Apply top-to-bottom so each later tracker absorbs earlier inserts.
         self._apply_blank_line_logic(head_block)
-        self._apply_blank_line_logic(tail_tracker.block())
+        self._apply_blank_line_logic(junction_tracker.block())
+        self._apply_blank_line_logic(bottom_tracker.block())
 
         # Formats aren't reliably preserved across a bulk text replace -
         # reformat every block in the final (post-blank-fix) region.
         b = self.document().findBlock(span_start_pos)
-        final_tail = tail_tracker.block()
+        final_tail = bottom_tracker.block()
         while True:
             self._apply_hanging_indent(b)
             if b.blockNumber() == final_tail.blockNumber():
