@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox
 
@@ -34,6 +35,12 @@ class MainWindow(QMainWindow):
 
         self.editor.document().modificationChanged.connect(self._update_title)
         self._build_menu()
+        if self._always_on_top_action.isChecked():
+            # Set before _restore_geometry() and before main.py calls show():
+            # setWindowFlag re-creates the native window, which would discard a
+            # geometry restored beforehand. No re-show needed here - unlike the
+            # runtime toggle, this window hasn't been shown yet.
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self._restore_geometry()
         self._update_title()
 
@@ -93,7 +100,29 @@ class MainWindow(QMainWindow):
         discard_action.triggered.connect(self.discard_document)
         file_menu.addAction(discard_action)
 
+        self._build_view_menu()
         self._build_shortcuts_menu()
+
+    def _build_view_menu(self) -> None:
+        view_menu = self.menuBar().addMenu("&View")
+
+        self._always_on_top_action = QAction("Always on &top", self)
+        self._always_on_top_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self._always_on_top_action.setCheckable(True)
+        # setChecked before connecting, so restoring the saved state doesn't
+        # fire the handler (and its show()) partway through construction.
+        self._always_on_top_action.setChecked(settings.load_always_on_top())
+        self._always_on_top_action.toggled.connect(self.set_always_on_top)
+        view_menu.addAction(self._always_on_top_action)
+
+    def set_always_on_top(self, enabled: bool) -> None:
+        """Float above every non-topmost window, so the outline stays readable
+        while another app holds focus. On Windows setWindowFlag re-creates the
+        native window and leaves it hidden, so it has to be re-shown.
+        """
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, enabled)
+        self.show()
+        settings.save_always_on_top(enabled)
 
     def _build_shortcuts_menu(self) -> None:
         """A read-only cheat sheet of every keybinding, sitting to the right
@@ -120,6 +149,7 @@ class MainWindow(QMainWindow):
                 ("Ctrl+Alt+Up / Down", "Move line + its subtree"),
             ]),
             ("View", [
+                ("Ctrl+Shift+P", "Always on top (toggle)"),
                 ("Ctrl+Shift+C", "Compress: collapse blank lines (toggle)"),
                 ("Ctrl+= / Ctrl+-", "Zoom in / out (font size)"),
                 ("Ctrl+0", "Reset zoom"),

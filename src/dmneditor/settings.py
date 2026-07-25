@@ -26,6 +26,19 @@ def load_geometry() -> Optional[QByteArray]:
     return value if value else None
 
 
+def save_always_on_top(enabled: bool) -> None:
+    _settings().setValue("window/always_on_top", bool(enabled))
+
+
+def load_always_on_top() -> bool:
+    value = _settings().value("window/always_on_top")
+    if isinstance(value, bool):
+        return value
+    # QSettings' Windows registry backend round-trips bools back as strings,
+    # and "false" is truthy - so compare against the text, never bool(value).
+    return str(value).strip().lower() in ("true", "1")
+
+
 def save_font_point_size(size: int) -> None:
     _settings().setValue("editor/font_point_size", int(size))
 
